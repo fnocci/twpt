@@ -1,0 +1,242 @@
+
+ twpt -- the tw pthreads problem
+
+ Copyright (C) 2010  Cheryl Fillekes
+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+SPECIFICATION 
+
+  The problem:
+  In the programming language of your choice (one of C/C++/java), write 
+  a multithreaded simulator that runs 'T' threads and exits when done.
+  The behavior of the threads and the executable is described below.
+
+  Thread run: Each thread has to do the following
+                Picks 2 random accounts from N-user-accounts.
+                Transfers 'X' dollars from source-account to destination-account.
+                Go back to step-1
+
+  Thread Exit: The threads should all terminate when there is one account with zero balance.
+
+  Input: The executable can take three arguments
+                'T': number of simultaneous threads to start.
+                'X': number of dollars for each transfer.
+                'N': number of user accounts
+
+  Output: The output will be the number of transactions it takes before the threads exit.
+
+DESIGN GOALS
+
+  required:  correct operation with no deadlock, no race conditions
+  desirable: optimal concurrency, easy to build and invoke
+
+BUILD AND USE
+
+  twpt stands for "tw pthreads problem" 
+
+  usage: twpt -h (help)
+	-T <numThreads>
+	-X <Xfer amt>
+	-N <Num accounts>
+	-M <initial Max balance>
+	-q <min queue size>
+	-s <seed for rand>
+	-v verbose
+
+  if invoked with -v will get lots of intermediary results on stderr
+  otherwise get a report of the iteration counter at exit, on stdout
+
+  built and tested with gcc 4.2.4 on 2.6.24-28-generic kernel
+
+  notes on system/library calls 
+ 
+    posix threads library only external library linked 
+    random is used only in main thread, being thread-unsafe
+  
+ALGORITHM
+
+  NB the actual implementation of twpt has changed since I wrote this down.
+
+  A. Initialization 
+    0. process opts, throw out invalid data and bad combinations 
+    1. initialize accounts with random values up to opts.M
+    2. shuffle them so that accessing them by index gives you a random account
+    3. set up an 'inactive accounts' queue of at least minimum size 
+    4. initialize thread data with a active accounts chosen sequentially from shuffled deck
+     if too few accounts for T threads, initialize with both accounts to 0 and condition, 
+     (which initialized thread takes as a signal to do nothing and wait.)
+
+  After Initialization:
+  main thread manages available account queue by cycle through thread data, 
+  looking for waiting and giving it data off the accounts available buffer
+ 
+      if available accts list is >= min+2: 
+          retrieve 2 from it, one from the bottom, one at random
+          check current thread for a non-zero condition variable. 
+          if thread not available, move on to next until there is a thread free -- unlock.
+
+        when find thread free (thread is waiting): 
+             lock its account pair 
+             read its acct pair into local var 
+             replace its acct pair with the 2 retrieved  
+             set cond var 
+             lock mutex and send thread cond var
+
+      if available accts list is < min+2, set 'retrieved' data to 0 0 
+         check current thread for a non-zero condition variable. 
+         when find thread free 
+              get its thread pair and replace it with 0 0, set cond var to 0 
+              relock thread acct pair and send (no-op)
+              put these two accts on *end* of queue 
+      
+
+  Thread Processing: 
+  each thread processes its initial account pair unlocked on the accounts table, 
+  goes right to waiting on the non-zero condition variable if it gets the zeroth accounts
+
+     in detail:
+
+     processing the accounts
+     using the locked pair passed to it by the main thread from the available accounts table
+       if 0 0, go back to waiting.
+       if not 0 0:
+          get those 2 accts into local vars
+          with local vars, calculate the 2 new account balances
+             if transaction will fail (one balance negative), go back to waiting 
+                (these accts will be consequently be put back on the available queue)
+             if transaction will result in one zero balance: 
+                lock transaction counter, increment it and report result to stdout.
+                clean up and exit
+             if transaction it will succeed with 2 nonzero non-negative balances: 
+                update both accounts in the table
+                check for *cancellation*, exit if yes.  if none:
+                lock transaction counter, increment it and unlock immediately. 
+            decrement thread's condition variable to zero and go back to waiting. 
+
+LIMITATIONS:
+
+ twpt_bad_opts is designed to take more tests for bad combinations of input options.
+ it currently only tests for one.
+
+ this rev of twpt could use rwlocks in certain places to go faster.
+
+ the available accounts queue isn't really a queue but it's called that in places.
+
+ twpt could definitely be tested with more combinations of options, just for fun. 
+
+BUILD ENVIRONMENT:      
+  
+gort@blort:~/twpt$ uname -a 
+linux blort 2.6.24-28-generic #1 SMP Thu Sep 16 15:01:14 UTC 2010 i686 GNU/Linux
+gort@blort:~/twpt$ gcc -v
+Using built-in specs.
+Target: i486-linux-gnu
+Configured with: ../src/configure -v --enable-languages=c,c++,fortran,objc,obj-c++,treelang --prefix=/usr --enable-shared --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --enable-threads=posix --enable-nls --with-gxx-include-dir=/usr/include/c++/4.2 --program-suffix=-4.2 --enable-clocale=gnu --enable-libstdcxx-debug --enable-objc-gc --enable-mpfr --enable-targets=all --enable-checking=release --build=i486-linux-gnu --host=i486-linux-gnu --target=i486-linux-gnu
+Thread model: posix
+gcc version 4.2.4 (Ubuntu 4.2.4-1ubuntu4)
+
+INITIAL ANALYSIS:
+
+this is a run of twpt:
+gort@blort:~/twpt$ ./twpt -v -T 2 -X 10 -N 10  -M 100 -q 3  >& yeah4
+
+sorry about the insolent naming of the test output files.
+
+The distribution of random accounts assigned to the threads as source and dest seems uniform:
+gort@blort:grep source: yeah4 | sort -n -k 2 | uniq -c -w 10 | more
+   2128 source:	1	-102	
+   2138 source:	2	-1005	
+   2008 source:	3	1006	
+   2048 source:	4	104	
+   2118 source:	5	-1	
+   1946 source:	6	1003	
+   2002 source:	7	103	
+   2016 source:	8	-102	
+   2022 source:	9	-103	
+   2046 source:	10	1	
+gort@blort:~/twpt$ grep dest: yeah4 | sort -n -k 2 | uniq -c -w 10 | more
+   1974 dest:  	1	-102	
+   1912 dest:  	2	-1005	
+   2216 dest:  	3	1006	
+   2024 dest:  	4	104	
+   2010 dest:  	5	-1	
+   2112 dest:  	6	1003	
+   2096 dest:  	7	103	
+   1984 dest:  	8	-102	
+   2036 dest:  	9	-103	
+   2108 dest:  	10	1	
+gort@blort:~/twpt$ 
+
+in another regime where we start with more populated threads:
+
+gort@blort:~/twpt$ head -5 yeah5
+T=7
+X=10
+N=10
+M=100
+minimum queue size=3
+
+grep source: yeah5 | sort -n -k 2 | uniq -c -w 10 | more
+gort@blort:~/twpt$ ^4^5
+grep source: yeah5 | sort -n -k 2 | uniq -c -w 10 | more
+     94 source:	1	106	
+    109 source:	2	10	
+     96 source:	3	102	
+    112 source:	4	12	
+     92 source:	5	103	
+    558 source:	6	108	
+    612 source:	7	1	
+    102 source:	8	-102	
+    120 source:	9	107	
+    102 source:	10	-12	
+gort@blort:~/twpt$ ^source^dest
+grep dest: yeah5 | sort -n -k 2 | uniq -c -w 10 | more
+    102 dest:  	1	106	
+     98 dest:  	2	100	
+    110 dest:  	3	102	
+     90 dest:  	4	12	
+    104 dest:  	5	103	
+    618 dest:  	6	108	
+    583 dest:  	7	-109	
+    106 dest:  	8	-102	
+     88 dest:  	9	107	
+     98 dest:  	10	-12	
+gort@blort:~/twpt$ head -5 yeah5
+T=7
+X=10
+N=10
+M=100
+minimum queue size=3
+
+yeah6, yeah7 and yeah8 are sort of interesting too. YMMV.  enjoy.
+
+COMMENTS: 
+
+  While the spec seems to imply that each thread should be getting 2 accounts at a time 
+  autonomously on an accounts table, this is a recipe deadlock and/or race conditions.
+
+  It says the thread "picks 2 random accounts from N-user-accounts" but does not specify 
+  the implementation; I chose to implement this with a one main feeder + many peer threads,
+  with an 'available accounts' table which is the complement of the set of accounts that 
+  actively being processed by the threads.
+
+  I use a cleanup and exit from the 'winning' thread rather than some fancy cancellation
+  and cleanup, because all we have to is increment the (locked) counter and report it 
+  and then everything can die with an exit.  
+
+  Using shuffling of the account records with the id's attached to the records, rather
+  than using the place-in-table as the account id gave a little more abstraction and 
+  flexibility.  It was also vastly entertaining to debug.
